@@ -1,0 +1,149 @@
+---
+title: "02_phos_phenotype_correlations"
+author: "Elise Needham"
+date: "17/4/2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+#loading packages
+```{r}
+options(stringsAsFactors = F)
+library(ggplot2)
+library(reshape2)
+library(qvalue)
+library(dplyr)
+library(rmcorr)
+```
+
+#read in data
+```{r}
+#phenotype: leg-specific glucose uptake measured by arterio-venous difference in [glucose]. The insulin measures represent the steady state (mean of last three timepoints: last 40 min of 2 hr hyperinsulinemic-euglycemic clamp)
+gu <- readRDS("glucose_uptake.rds")
+
+
+#phosphosite data filtered for regulated (padj < 0.05 and |log2(FC)| > log2(1.5)), and quantified in at least 50% of the samples. We are using non-imputed data here because imputation would add noise to the associations between subject-specific measures. Row names are gene_uniprot_site_multiplicity.
+phos <- readRDS("phos_sig_ided_filt.rds")
+```
+
+#visualise the phenotypic data
+```{r}
+ggplot(gu, aes(x = insulin, y = glucose_uptake, group = subject)) + 
+  geom_line(aes(group = subject_ex, colour = exercise)) + 
+  geom_point(aes(colour = exercise), size = 3) +
+  geom_point(data = gu[gu$exercise == "Ex",], aes(pch = subject), size = 2, col = "black") + 
+  geom_point(data = gu[gu$exercise == "Rest",], aes(pch = subject), size = 2, col = "white") + 
+  scale_shape_manual(values = as.character(1:5)) +
+  scale_color_manual(values = c("#00AEEF", "grey30")) + 
+  theme_bw() +
+  theme(panel.grid = element_blank(), 
+        panel.border = element_blank(), 
+        axis.line = element_line(size = 0.3),
+        axis.text = element_text(colour = "black")) +
+  labs(x = "", y = "Glucose Uptake", color = "") + 
+  guides(shape = F)
+```
+
+#z-score data
+```{r}
+#wide format for convenience here
+gu$subject_ex_ins <- paste(gu$subject_ex, gu$insulin, sep = "_")
+gu_wide <- t(gu[,"glucose_uptake"])
+colnames(gu_wide) <- gu$subject_ex_ins
+gu_wide <- apply(gu_wide, 2, as.numeric)
+
+#z-score
+means <- mean(gu_wide)
+sds <- sd(gu_wide)
+tmp <- gu_wide - means
+gu_z <- tmp/sds
+
+```
+
+##Justification of filtering for significance first: don't want small changes that didn't reach the significance threshold amplified by z-score.
+```{r}
+z_score <- function(mat) {
+  means <- apply(mat, 1, mean, na.rm = T)
+  sds <- apply(mat, 1, sd, na.rm = T)
+  tmp <- sweep(mat, 1, means, FUN="-")
+  mat_z <- sweep(tmp, 1, sds, FUN="/")
+  return(mat_z)
+}
+
+phos_z <- z_score(phos)
+```
+
+
+#correlation
+```{r}
+cors <- data.frame(site = rownames(phos_z), r = NA, p = NA)
+for(i in 1:nrow(phos_z)) {
+  #filtering for non-missing samples to correlate on complete observations.
+  ided <- colnames(phos_z)[is.na(phos_z[i,]) == F] 
+  #note: the samples need the same naming in the phenotype and phospho datasets
+  cor_object <- cor.test(as.numeric(phos_z[i,ided]), gu_z[ided], method = "pearson") 
+  cors[i, "r"] <- cor_object$estimate
+  cors[i, "p"] <- cor_object$p.value
+}
+
+#adjust p-values
+cors$padj <- p.adjust(cors$p, method = "BH")
+
+```
+
+#plot a histogram of the p-values to estimate the true positives/negatives
+```{r}
+qobj <- qvalue(p = cors$p)
+
+num_bins <- 20 #so in 0.05 increments
+
+ggplot(cors, aes(x = p)) +
+  geom_histogram(bins = num_bins) +
+  geom_hline(yintercept = qobj$pi0*length(cors$p)/num_bins ) +
+  theme_minimal() +
+  theme(axis.text = element_text(colour = "black", size = 10), 
+        legend.position = "none",
+        panel.grid = element_blank(),
+        axis.line = element_line(),
+        axis.ticks = element_line()) +
+  scale_y_continuous(limits = c(0, 300)) +
+  labs(x = "p-value", y = "# Sites")
+```
+
+
+#filter for significance
+```{r}
+cors_sig <- cors[cors$padj < 0.05,] 
+dim(cors_sig)
+```
+
+#rmcorr
+##NOTE: an alternative method that gave fairly equivalent results in this instance is rmcorr. This may be important if your samples are not independent (paired/repeated measures). In the major analysis in the manuscript, we perform Pearson's correlation so we assume our samples are independent. We see very similar results between the methods, which may be since we filtered for regulated sites to begin with, so even though samples are from the same individuals, they differ because of the conditions. Here is the implementation of rmcorr below.  
+```{r}
+long_gu <- melt(gu_z)
+
+#in a for loop right now but could rewrite to function for speed
+rm_cors_df <- data.frame(site = rownames(phos_z), r = NA, p = NA)
+for(i in 1:nrow(phos_z)) {
+  
+  long_phos <- t(phos_z[i,])
+  
+  long_merged <- merge(long_phos, long_gu, by = 0)
+  colnames(long_merged)[2] <- "phos"
+  colnames(long_merged) <- gsub("value", "gu", colnames(long_merged))
+  
+  long_merged$subject <- factor(sapply(long_merged$Row.names, function(x){
+    strsplit(x, "_")[[1]][1]
+  }))
+  
+  rm <- rmcorr(participant = subject, measure1 = phos, measure2 = gu, dataset = long_merged)
+  rm_cors_df$r[i] <- rm$r
+  rm_cors_df$p[i] <- rm$p
+ 
+}
+
+rm_cors_df$padj <- p.adjust(rm_cors_df$p, method = "BH")
+```
+
+
