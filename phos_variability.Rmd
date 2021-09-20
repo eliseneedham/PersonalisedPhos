@@ -1,0 +1,231 @@
+---
+title: "phos variability across subjects"
+author: "Elise Needham"
+date: "16/04/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+options(stringsAsFactors = F)
+library(gplots)
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+```
+
+
+#loading data
+```{r}
+proteome <- readRDS("proteome.rds")
+proteome_full <- na.omit(proteome) #for when we don't want any missing values
+
+phospho <- readRDS("phospho.rds") #using non-imputed data to look at the differences between subjects
+
+```
+
+
+#calculate fold changes of each phosphosite or protein to the median of that site/protein across all subjects
+```{r}
+#need to take the fold change to the median of all the sites
+#first calculate the per-site median
+
+fc_to_median <- function(input_dat, condition, missing_threshold){ #missing_threshold is the max number of missing samples in that particular condition you will handle. Condition needs to be the indicator of that condition in the column names
+  filt_ided <- input_dat[which(rowSums(is.na(input_dat[,grep(condition, colnames(input_dat))])) <= missing_threshold),]
+  medians <- apply(filt_ided[,grep(condition, colnames(filt_ided))], 1, median, na.rm = T)
+  fcs <- as.data.frame(sweep(filt_ided[,grep(condition, colnames(filt_ided))], 1, medians, "-"))
+  rownames(fcs) <- rownames(filt_ided)
+  return(fcs)
+}
+
+#phos conditions that have matched proteomes
+phospho_fcs_basal <- fc_to_median(phospho, "Rest_Basal", 2) #n = 5 in each condition here so am tolerating missing 2 samples so n = 3 remains
+phospho_fcs_basal$id <- rownames(phospho_fcs_basal)
+
+phospho_fcs_ex <- fc_to_median(phospho, "Ex_Basal", 2)
+phospho_fcs_ex$id <- rownames(phospho_fcs_ex)
+
+#proteome conditions
+prot_fcs_rest <- fc_to_median(proteome, "Rest", 2) 
+prot_fcs_rest$uniprot <- rownames(prot_fcs_rest)
+
+prot_fcs_ex <- fc_to_median(proteome, "Ex", 2) 
+prot_fcs_ex$uniprot <- rownames(prot_fcs_ex)
+```
+
+#graph proteome vs phospho
+```{r}
+#to long format and combining
+melted_phos<- rbind(melt(phospho_fcs_basal),
+                    melt(phospho_fcs_ex))
+colnames(melted_phos) <- c("site", "condition", "phos_val")
+melted_phos$uniprot <- sapply(melted_phos$site, function(x){
+  strsplit(x, "_")[[1]][2]
+})
+
+melted_prot <- rbind(melt(prot_fcs_rest),
+                     melt(prot_fcs_ex))
+colnames(melted_prot) <- c("uniprot", "condition", "prot_val")
+
+
+melted_phos$condition <- gsub("_Basal", "", melted_phos$condition) #proteomes were all measured at basal
+
+merged <- unique(merge(melted_phos, melted_prot, by = c("uniprot", "condition")))
+
+ggplot(merged, aes(x = phos_val, y = prot_val, label = site)) +
+  geom_vline(xintercept = 0, colour = "grey70") +
+  geom_hline(yintercept = 0, colour = "grey70") +
+  geom_point(size = 1, alpha = 0.2, stroke = 0) +
+  theme_minimal() +
+  labs(x = "Phosphosite", y = "Protein") +
+  theme(axis.ticks = element_line(), 
+        panel.grid = element_blank(),
+        axis.text = element_text(colour = "black"),
+        axis.line = element_line()) 
+```
+
+#Determine how many variable phosphosites are on variable proteins
+```{r}
+variable_sites_prots <- nrow(merged[union(which(merged$phos_val > log2(1.5) &
+                                                  (merged$prot_val > log2(1.5))),
+                                          which(merged$phos_val < -log2(1.5) &
+                                                  (merged$prot_val < -log2(1.5)))),]) #978
+
+
+variable_sites_all <-nrow(merged[union(which(merged$phos_val > log2(1.5)),
+                                        which(merged$phos_val < -log2(1.5))),]) #7538
+
+#percentage of variable sites also on variable proteins
+variable_sites_prots/variable_sites_all * 100
+```
+
+#calculating CVs
+```{r}
+CV <- function(vals){
+  cv <- sd(vals, na.rm=TRUE)/ 
+   mean(vals, na.rm=TRUE)*100
+  return(cv)
+}
+
+#INTER
+phospho <- phospho[which(rowSums(is.na(phospho)) <= 15),] #filtering for identified in at least 5 samples
+
+phospho_unlog <- 2^phospho
+proteome_unlog <- 2^proteome
+
+#proteome
+proteome_inter_cvs <- c(apply(proteome_unlog[,grep("Rest", colnames(proteome_unlog))], 1, CV),
+                        apply(proteome_unlog[,grep("Ex", colnames(proteome_unlog))], 1, CV)) #performing within treatment groups
+proteome_inter_cvs_df <- data.frame(protein = rep(rownames(proteome_unlog), 2), inter_cvs = proteome_inter_cvs)
+
+#phosphoproteome
+phos_subjects <- sapply(colnames(phospho_unlog), function(x){
+  strsplit(x, "_")[[1]][1]
+})
+phos_conditions <- sapply(colnames(phospho_unlog), function(x){
+  substr(x, 3, nchar(x)) #since all subjects are only one character long
+})
+
+phos_inter_cv_list <- list()
+for(i in 1:length(unique(phos_conditions))){
+  phos_inter_cv_list[[i]] <- apply(phospho_unlog[,grep(unique(phos_conditions)[i], colnames(phospho_unlog))], 1, CV)
+}
+phos_inter_cvs <- unlist(phos_inter_cv_list)
+phos_inter_cvs_df <- data.frame(site = rep(rownames(phospho_unlog), length(unique(phos_conditions))), inter_cvs = phos_inter_cvs)
+
+#INTER SUBJECT VARIANCES
+phos_intra_cv_list <- list()
+for(i in 1:length(unique(phos_subjects))){
+  phos_intra_cv_list[[i]] <- apply(phospho_unlog[,grep(unique(phos_subjects)[i], colnames(phospho_unlog))], 1, CV)
+}
+phos_intra_cvs <- unlist(phos_intra_cv_list)
+phos_intra_cvs_df <- data.frame(site = rep(rownames(phospho_unlog), length(unique(phos_subjects))), intra_cvs = phos_intra_cvs)
+
+proteome_intra_cv_list <- list()
+for(i in 1:length(unique(phos_subjects))){ #phos subjects are the same as proteome subjects
+  proteome_intra_cv_list[[i]] <- apply(proteome_unlog[,grep(unique(phos_subjects)[i], colnames(proteome_unlog))], 1, CV)
+}
+proteome_intra_cvs <- unlist(proteome_intra_cv_list)
+proteome_intra_cvs_df <- data.frame(site = rep(rownames(proteome_unlog), length(unique(phos_subjects))), intra_cvs = proteome_intra_cvs)
+
+merged_dat <- rbind(data.frame(cond = "prot_intra", cv = proteome_intra_cvs),
+                    data.frame(cond = "prot_inter", cv = proteome_inter_cvs),
+                    data.frame(cond = "phos_intra", cv = phos_intra_cvs),
+                    data.frame(cond = "phos_inter", cv = phos_inter_cvs))
+merged_dat$cond <- factor(merged_dat$cond, levels = unique(merged_dat$cond))
+
+ggplot(merged_dat, aes(x = cond, y = cv)) +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(panel.grid = element_blank(),
+        axis.ticks = element_line()) +
+  labs(y = "CV (%)", x = element_blank())
+```
+
+#classifying stable/variable phosphoproteome across subjects
+```{r}
+#I chose these thresholds by looking at the distributions of the CVs, but it is pretty arbitrary. The question here is just what phoshosites are the most stable/variable between subjects. 
+
+variable_inter <- phos_inter_cvs_df[which(phos_inter_cvs_df$inter_cvs > 75),]
+length(unique((variable_inter$site))) #926
+
+#to find stable calculate the max inter cv
+max_inter_cvs <- phos_inter_cvs_df %>%
+  group_by(site) %>%
+  summarise(max = max(inter_cvs, na.rm = T))
+
+
+stable_inter <- max_inter_cvs[which(max_inter_cvs$max <= 15),] 
+```
+
+#are the stable sites on stable proteins?
+```{r}
+stable_inter$protein <- sapply(stable_inter$site, function(x){
+  strsplit(x, "_")[[1]][2]
+})
+
+
+stable_inter_phos_w_protein <- merge(stable_inter, proteome_inter_cvs_df, by = "protein")
+
+stable_both <- stable_inter_phos_w_protein[which(stable_inter_phos_w_protein$inter_cvs <= 15),]
+```
+
+
+#s curve of cvs
+```{r}
+ordered_phos_inter_cvs <- phos_inter_cvs_df[order(phos_inter_cvs_df$inter_cvs),]
+ordered_phos_inter_cvs$site <- gsub("____", "", ordered_phos_inter_cvs$site)
+
+#filter for the sites with enough IDs:
+processed_phos <- readRDS("processed_phos.rds") #I took thresholds filtering for #IDs before downstream analyses.
+filt_phos_inter_cvs <- ordered_phos_inter_cvs[which(ordered_phos_inter_cvs$site %in% processed_phos$gene_uniprot_site_multiplicity),]
+
+filt_phos_inter_cvs$rank  <- 1:nrow(filt_phos_inter_cvs)
+
+ggplot(filt_phos_inter_cvs , aes(x = inter_cvs, y = rank)) + 
+  geom_point(size = 0.1) + 
+  theme_minimal() +
+  theme(panel.grid = element_blank(),
+        axis.line = element_line(),
+        axis.text = element_text(colour = "black"),
+        axis.ticks = element_line())
+
+#manually colour the sites of interest
+filt_phos_inter_cvs$special_site <- ""
+filt_phos_inter_cvs$special_site[which(filt_phos_inter_cvs$site %in% c("ATP5F1B_P06576_T213_1", "MAPK1_P28482_T185_2", "YWHAG_P61981_Y133_1", "ROCK2_O75116_S1374_1") == T)] <- filt_phos_inter_cvs$site[which(filt_phos_inter_cvs$site %in% c("ATP5F1B_P06576_T213_1", "MAPK1_P28482_T185_2", "YWHAG_P61981_Y133_1", "ROCK2_O75116_S1374_1") == T)]
+
+ggplot(filt_phos_inter_cvs , aes(x = inter_cvs, y = rank)) + 
+  geom_point(aes(colour = special_site, size = special_site)) + 
+  scale_size_manual(values = c(0.1, rep(3, 4))) +
+  theme_minimal() +
+  scale_colour_manual(values = c("black", "yellow", "green", "blue", "purple")) +
+  theme(panel.grid = element_blank(),
+        axis.ticks = element_line(),
+        axis.line = element_line(),
+        axis.text = element_text(colour = "black")) +
+  labs(x = "inter-subject CV (%)", y = "Rank")
+```
+
+
+
