@@ -197,14 +197,18 @@ stable_both <- stable_inter_phos_w_protein[which(stable_inter_phos_w_protein$int
 ordered_phos_inter_cvs <- phos_inter_cvs_df[order(phos_inter_cvs_df$inter_cvs),]
 ordered_phos_inter_cvs$site <- gsub("____", "", ordered_phos_inter_cvs$site)
 
-#filter for the sites with enough IDs:
-processed_phos <- readRDS("processed_phos.rds") #I took thresholds filtering for #IDs before downstream analyses.
-filt_phos_inter_cvs <- ordered_phos_inter_cvs[which(ordered_phos_inter_cvs$site %in% processed_phos$gene_uniprot_site_multiplicity),]
+
+highly_ided <- rownames(phospho[which(rowSums(is.na(phospho)) <= 6),])
+highly_ided <- gsub("_____", "_", highly_ided)
+
+
+filt_phos_inter_cvs <- ordered_phos_inter_cvs[which(ordered_phos_inter_cvs$site %in% highly_ided),]
 
 filt_phos_inter_cvs$rank  <- 1:nrow(filt_phos_inter_cvs)
 
 ggplot(filt_phos_inter_cvs , aes(x = inter_cvs, y = rank)) + 
   geom_point(size = 0.1) + 
+  scale_y_continuous(limits   = c(0, 30000)) +
   theme_minimal() +
   theme(panel.grid = element_blank(),
         axis.line = element_line(),
